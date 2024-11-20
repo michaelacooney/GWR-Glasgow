@@ -1,0 +1,933 @@
+# Name: Michaela Cooney
+# Script Purpose: Analyzing spatial autocorrelation and running a Geographically Weighted Regression model to understand the spatial relationships of domestic heat demand in Glasgow
+
+setwd("C:/Users/mc432/OneDrive - University of St Andrews/GG4328/Lab Assignment 1/FinalRCode")
+
+
+library(sf)
+library(tmap)
+library(RColorBrewer)
+library(grid)
+library(gridExtra)
+library(GWmodel)
+library(AICcmodavg)
+
+
+# read shapefile
+dataGWR <- sf::read_sf("Glasgow_Heat_ID.shp")
+
+
+# Explore the data: plot all variables
+plot(dataGWR)
+
+
+# Map of the dependent variable, the average domestic demand for heat in Glasgow
+tm_shape(dataGWR) + tm_fill("AvDom_Heat") +tm_borders()
+
+#Maps of independent variables
+tm_shape(dataGWR) + tm_fill("Perc_Priva") +tm_borders()
+tm_shape(dataGWR) + tm_fill("Perc_65Plu") +tm_borders()
+tm_shape(dataGWR) + tm_fill("Perc_HomeO") +tm_borders()
+tm_shape(dataGWR) + tm_fill("Perc_HH_3P") +tm_borders()
+tm_shape(dataGWR) + tm_fill("Perc_Ethni") +tm_borders()
+tm_shape(dataGWR) + tm_fill("LandArePer") +tm_borders()
+tm_shape(dataGWR) + tm_fill("Perc_HomeW") +tm_borders()
+
+
+#don't need to do any re-projection, .shp file has .prj subfile 
+
+
+
+head(dataGWR) 
+#checking this in environment, I can see that Perc_HH_De and Perc_HH_Te are not in the right units
+
+dataGWR$Perc_HH_De <- dataGWR$Perc_HH_De * 100
+dataGWR$Perc_HH_Te <- dataGWR$Perc_HH_Te * 100
+head(dataGWR)
+
+# Shapefile saved with this change
+st_write(dataGWR,"Glasgow_Heat_GWR.shp")
+
+
+
+
+####~~~~Section 1~~~~####
+#step 3 - Run stepwise-AIC procedure to eliminate any redundant variables. 
+# Run model selection procedure
+
+# To convert data into a spatial data frame
+dataGWRspatial <- as_Spatial(dataGWR) 
+
+names(dataGWRspatial) 
+# Divide dependent (DeVar) and independent (InDeVars) variables
+DeVar <- "AvDom_Heat"
+InDeVars <- c("Perc_65Plu", "Perc_HomeO", "Perc_Priva", "Perc_HH_3P", "Perc_Ethni", "Perc_HH_De", "Perc_HH_Te", "LandArePer", "Perc_HomeW")
+
+# Calculating optimal bandwidth on a full model (all variables)
+optimalBW <- bw.gwr(AvDom_Heat ~ 
+                      Perc_65Plu+Perc_HomeO+Perc_Priva+Perc_HH_3P+Perc_Ethni+Perc_HH_De+Perc_HH_Te+LandArePer+Perc_HomeW, data=dataGWRspatial, approach="AICc", kernel="bisquare", adaptive=TRUE)
+
+# Running model selection with optimal bandwidth
+modelSel <- model.selection.gwr(DeVar, InDeVars, data=dataGWRspatial, kernel="bisquare", adaptive=TRUE, bw=optimalBW)
+
+
+
+# To visualize model selection in a radial plot
+
+# Extract list of models from the results, this creates a list of the order in which they were generated
+sortedModels <- model.sort.gwr(modelSel, numVars <- length(InDeVars), ruler.vector = modelSel[[2]][,2])
+modelList <- sortedModels[[1]]
+
+modelList
+
+# Plot the list in a radial plot
+model.view.gwr(DeVar, InDeVars, model.list=modelList)
+
+
+
+# Export in a figure
+png(filename="ModelSelection_RadialView.png", width=800, height = 600)
+model.view.gwr(DeVar, InDeVars, model.list=modelList)
+dev.off()
+
+
+#Graph showing the decrease of AICc.
+
+# number of independent variables
+n <- length(InDeVars)
+
+# Export list of AICc values from the sorted models
+AICcList <- sortedModels[[2]][,2]
+
+# list of indices that will recreate this sequence of locations using a for loop
+
+indices <- rep(n, n) # initialise a list of indicies as n values of n, the first position is already correct
+
+for (i in 2:n) {
+  indices[i]=indices[i-1]+((n-i)+1)
+}
+
+indices 
+
+
+# AICc values for models at these indices
+AICcBestModelValues <- AICcList[indices]
+
+AICcBestModelValues
+
+#selecting model descriptions from the model selection result
+BestModels <- sortedModels[[1]][indices]
+BestModels
+
+# Variables listed in the order of addition
+BestModels[n]
+
+
+# Manually created list of variables
+variablesAsAdded <- c("LandArePer", "Perc_Priva", "Perc_HomeO", "Perc_HomeW", "Perc_Ethni", "Perc_HH_3P", "Perc_65Plu", "Perc_HH_Te", "Perc_HH_De") 
+
+# Plotting
+plot(cbind(1:9,AICcBestModelValues), col = "black", pch = 20, lty = 5, 
+     main = "AICc optimisation", ylab = "AICc", type = "b", axes=FALSE)
+par(las=2) # This will rotate labels on x axis for 90 degrees
+axis(1, at=1:9, labels=variablesAsAdded) # this plots variable names as labels on x axis
+axis(2, at=NULL, labels=TRUE) # this plots numbers on y axis
+
+
+# And exporting the plot as a figure
+png(filename="AICcOptimisation.png", width=1024)
+plot(cbind(1:9,AICcBestModelValues), col = "black", pch = 20, lty = 5, 
+     main = "AICc optimisation", ylab = "AICc", type = "b", axes=FALSE)
+par(las=2) 
+axis(1, at=1:9, labels=variablesAsAdded) 
+axis(2, at=NULL, labels=TRUE) 
+dev.off()
+
+###overfitting occurred, where the optimal bandwidth was passed
+##where certain variables are then removed
+
+AICcDifference <- AICcBestModelValues[1:(n-1)]-AICcBestModelValues[2:n]
+AICcDifference
+
+
+#########step 4 - Calibrate a GWR model with variables from step 3.#########
+
+
+# Calculate optimal bandwidth on a best model (with 2 variables excluded)
+optimalBW <- bw.gwr(AvDom_Heat ~ 
+                      LandArePer+Perc_Priva+Perc_HomeO+Perc_HomeW+Perc_Ethni+Perc_HH_3P+Perc_65Plu, data=dataGWRspatial, approach="AICc", kernel="bisquare", adaptive=TRUE)
+
+# Run the GWR model
+gwrmodel <- gwr.basic(AvDom_Heat ~ 
+                        LandArePer+Perc_Priva+Perc_HomeO+Perc_HomeW+Perc_Ethni+Perc_HH_3P+Perc_65Plu, data=dataGWRspatial, bw=optimalBW, kernel="bisquare", adaptive=TRUE) 
+
+
+
+
+
+
+
+
+
+
+
+
+####step 5 - Interpret results of the model from step 4.#######
+
+# Print descriptive results of GWR on console
+print(gwrmodel)
+
+# Save descriptive results of GWR into a text file
+capture.output(gwrmodel, file="GWRmodel_descriptiveResult.txt", append = TRUE)
+
+
+
+#####~~~~Section 3~~~~~~~######
+
+###step 1### 
+
+#interpretation of the above
+
+#####Step 2 - Parameter estimates and t-value maps#########
+# Change results into an ordinary data frame
+results <- as.data.frame(gwrmodel$SDF)
+
+names(results)
+head(results)
+
+head(dataGWR)
+
+# Join results to the original data
+mapGWR <- cbind(dataGWR, as.matrix(results))
+
+# Check:
+head(mapGWR)
+
+
+# Change names of columns with parameter estimates
+names(mapGWR)
+
+# adding beta to show that this is the parameter estimate
+names(mapGWR)[which(names(mapGWR)=="Intercept")] <- "Intercept_beta"
+names(mapGWR)[which(names(mapGWR)=="LandArePer.1")] <- "LandArePer_beta"
+names(mapGWR)[which(names(mapGWR)=="Perc_Priva.1")] <- "Perc_Priva_beta"
+names(mapGWR)[which(names(mapGWR)=="Perc_HomeO.1")] <- "Perc_HomeO_beta"
+names(mapGWR)[which(names(mapGWR)=="Perc_HomeW.1")] <- "Perc_HomeW_beta"
+names(mapGWR)[which(names(mapGWR)=="Perc_Ethni.1")] <- "Perc_Ethni_beta"
+names(mapGWR)[which(names(mapGWR)=="Perc_HH_3P.1")] <- "Perc_HH_3P_beta"
+names(mapGWR)[which(names(mapGWR)=="Perc_65Plu.1")] <- "Perc_65Plu_beta"
+
+
+# check
+head(mapGWR)
+
+
+
+########Parameter estimate and t-value maps for LandArePer#########
+
+###### Parameter estimate map for LandArePer######
+Map_LandArePer_beta_firstCheck <- tm_shape(mapGWR) + tm_fill("LandArePer_beta", style="equal", n=7)
+Map_LandArePer_TV_firstCheck <- tm_shape(mapGWR) + tm_fill("LandArePer_TV", style="equal", n=7)
+# Put the two maps into a grid, side by side in the following steps:
+# Create an empty new grid
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_LandArePer_beta_firstCheck, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_LandArePer_TV_firstCheck, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Make a better parameter estimate map for LandArePer
+
+# Create classification class breaks 
+breaksLandArePer_beta <- seq(0, 0.041, length.out = 7)
+
+# An improved Parameter estimate map - let's first see how this looks like
+tm_shape(mapGWR) + tm_fill("LandArePer_beta", style="fixed", breaks=breaksLandArePer_beta, palette="RdBu")+tm_borders()
+
+# legend is overlapping the map
+# Calculate current bounding box of the data and range in x and y directions
+bbox1 <- st_bbox(mapGWR) 
+xrange <- bbox1$xmax - bbox1$xmin # range of x values
+yrange <- bbox1$ymax - bbox1$ymin # range of y values
+# Extending left-to-right dimension by adding 25% more space to the right
+bbox1[3] <- bbox1[3] + (0.25 * xrange) 
+# Now we make this into an sf polygon
+bbox1 <- bbox1 %>% st_as_sfc()
+# And include this into the map, plus set the legend to appear on the top right
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("LandArePer_beta", style="fixed", breaks=breaksLandArePer_beta, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+# Saved this into a map variable to display in the grid
+Map_LandArePer_beta_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("LandArePer_beta", style="fixed", breaks=breaksLandArePer_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Make a better T value map for LandArePer
+
+# Create classification class breaks
+breaksLandArePer_TV <- seq(-0.390, 5.810, length.out = 7)
+
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("LandArePer_TV", style="fixed", breaks=breaksLandArePer_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+
+Map_LandArePer_TV_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("LandArePer_TV", style="fixed", breaks=breaksLandArePer_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+
+# Put the two final maps into a grid:
+# Create an empty new grid
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_LandArePer_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_LandArePer_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Export the figure
+
+# Opening the graphics device to make a .png, wide to avoid overprinting of legend
+png(filename="LandArePer_PE_TV.png", width = 1600)
+# Draw the map as above
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(Map_LandArePer_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_LandArePer_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+# Close the graphics device
+dev.off()
+
+
+#Joint map
+# Finding out where these values are not significant 
+whereNonSig <- which(mapGWR$LandArePer_TV>-1.96 & mapGWR$LandArePer_TV<1.96)
+# This created a list of indices where T value shows that the parameter estimate is not significant
+
+# Creating a new attribute, identical to beta
+mapGWR$LandArePer_beta_sig <- mapGWR$LandArePer_beta
+
+# Assigning value NA to all nonsignificant rows in this attribute
+mapGWR$LandArePer_beta_sig[whereNonSig] <- NA
+
+# parameter estimate map showing parameter estimate values only where these are significant
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("LandArePer_beta_sig", style="fixed", breaks=breaksLandArePer_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+#map
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("LandArePer_beta_sig", style="fixed", breaks=breaksLandArePer_beta, palette="RdBu",colorNA="white",textNA="Non-significant")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Export into figure:
+png(filename="LandArePer_beta_TV_JointMap.png", width = 1600)
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("LandArePer_beta_sig", style="fixed", breaks=breaksLandArePer_beta, palette="RdBu",colorNA="white",textNA="Non-significant" )+tm_borders()+tm_layout(legend.position = c("right", "top"))
+dev.off()
+
+
+
+
+########Parameter estimate and t-value maps for Perc_Priva############
+
+Map_Perc_Priva_beta_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_Priva_beta", style="equal", n=7)
+Map_Perc_Priva_TV_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_Priva_TV", style="equal", n=7)
+# Put the two maps into a grid, side by side in the following steps:
+# Create an empty new grid
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_Priva_beta_firstCheck, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_Priva_TV_firstCheck, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Create classification class breaks
+breaksPerc_Priva_beta <- seq(-0.407, 0.780, length.out = 7)
+
+
+# Parameter estimate map
+tm_shape(mapGWR) + tm_fill("Perc_Priva_beta", style="fixed", breaks=breaksPerc_Priva_beta, palette="RdBu")+tm_borders()
+
+# Calculate current bounding box of the data and range in x and y directions
+bbox1 <- st_bbox(mapGWR) 
+xrange <- bbox1$xmax - bbox1$xmin # range of x values
+yrange <- bbox1$ymax - bbox1$ymin # range of y values
+# Let's extend left-to-right dimension by adding 25% more space to the right
+bbox1[3] <- bbox1[3] + (0.25 * xrange) 
+# Now we make this into an sf polygon
+bbox1 <- bbox1 %>% st_as_sfc()
+# And include this into the map, plus set the legend to appear on the top right
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Priva_beta", style="fixed", breaks=breaksPerc_Priva_beta, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+# Saved this into a map variable for grid
+Map_Perc_Priva_beta_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Priva_beta", style="fixed", breaks=breaksPerc_Priva_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Make a better T value map for Perc_Priva_TV
+
+# Create classification class breaks
+breaksPerc_Priva_TV <- seq(-1.474, -0.200, length.out = 7)
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Priva_TV", style="fixed", breaks=breaksPerc_Priva_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+
+Map_Perc_Priva_TV_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Priva_TV", style="fixed", breaks=breaksPerc_Priva_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+# Put the two final maps into a grid, side by side in the following steps:
+# Create an empty new grid
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_Priva_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_Priva_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Export the figure
+
+png(filename="Perc_Priva_PE_TV.png", width = 1600)
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(Map_Perc_Priva_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_Priva_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+# Close the graphics device
+dev.off()
+
+
+#Joint map 
+# where these values are not significant
+whereNonSig <- which(mapGWR$Perc_Priva_TV>-1.96 & mapGWR$Perc_Priva_TV<1.96)
+
+# Now create a new attribute, identical to beta
+mapGWR$Perc_Priva_beta_sig <- mapGWR$Perc_Priva_beta
+
+# Now assign value NA to all nonsignificant rows in this attribute
+mapGWR$Perc_Priva_beta_sig[whereNonSig] <- NA
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Priva_beta_sig", style="fixed", breaks=breaksPerc_Priva_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Priva_beta_sig", style="fixed", breaks=breaksPerc_Priva_beta, palette="RdBu",colorNA="white",textNA="Non-significant")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Export into figure:
+png(filename="Perc_Priva_beta_TV_JointMap.png", width = 1600)
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Priva_beta_sig", style="fixed", breaks=breaksPerc_Priva_beta, palette="RdBu",colorNA="white",textNA="Non-significant" )+tm_borders()+tm_layout(legend.position = c("right", "top"))
+dev.off()
+
+
+
+
+
+
+########Parameter estimate and t-value maps for Perc_HomeO############
+# Create classification class breaks
+Map_Perc_HomeO_beta_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_HomeO_beta", style="equal", n=7)
+Map_Perc_HomeO_TV_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_HomeO_TV", style="equal", n=7)
+# Create an empty new grid
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_HomeO_beta_firstCheck, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HomeO_TV_firstCheck, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Create classification class breaks
+breaksPerc_HomeO_beta <- seq(-0.028, 0.333, length.out = 7)
+
+
+tm_shape(mapGWR) + tm_fill("Perc_HomeO_beta", style="fixed", breaks=breaksPerc_HomeO_beta, palette="RdBu")+tm_borders()
+
+
+# Calculate current bounding box of the data and range in x and y directions
+bbox1 <- st_bbox(mapGWR) 
+xrange <- bbox1$xmax - bbox1$xmin # range of x values
+yrange <- bbox1$ymax - bbox1$ymin # range of y values
+# Let's extend left-to-right dimension by adding 25% more space to the right
+bbox1[3] <- bbox1[3] + (0.25 * xrange) 
+# Now we make this into an sf polygon
+bbox1 <- bbox1 %>% st_as_sfc()
+# And include this into the map, plus set the legend to appear on the top right
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeO_beta", style="fixed", breaks=breaksPerc_HomeO_beta, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+# saved into a map variable for grid
+Map_Perc_HomeO_beta_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeO_beta", style="fixed", breaks=breaksPerc_HomeO_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Make a better T value map for Perc_HomeO_TV
+
+breaksPerc_HomeO_TV <- seq(-0.325, 2.805, length.out = 7)
+
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeO_TV", style="fixed", breaks=breaksPerc_HomeO_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_HomeO_TV_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeO_TV", style="fixed", breaks=breaksPerc_HomeO_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+# two final maps into a grid:
+# Create an empty new grid
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_HomeO_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HomeO_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Export the figure
+
+png(filename="Perc_HomeO_PE_TV.png", width = 1600)
+# Draw the map as above
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(Map_Perc_HomeO_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HomeO_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+# Close the graphics device
+dev.off()
+
+
+#Joint map 
+
+whereNonSig <- which(mapGWR$Perc_HomeO_TV>-1.96 & mapGWR$Perc_HomeO_TV<1.96)
+# This created a list of indices where T value shows that the parameter estimate is not significant
+
+# Now create a new attribute, identical to beta
+mapGWR$Perc_HomeO_beta_sig <- mapGWR$Perc_HomeO_beta
+
+# Now assign value NA to all nonsignificant rows in this attribute
+mapGWR$Perc_HomeO_beta_sig[whereNonSig] <- NA
+
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeO_beta_sig", style="fixed", breaks=breaksPerc_HomeO_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeO_beta_sig", style="fixed", breaks=breaksPerc_HomeO_beta, palette="RdBu",colorNA="white",textNA="Non-significant")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Export into figure:
+png(filename="Perc_HomeO_beta_TV_JointMap.png", width = 1600)
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeO_beta_sig", style="fixed", breaks=breaksPerc_HomeO_beta, palette="RdBu",colorNA="white",textNA="Non-significant" )+tm_borders()+tm_layout(legend.position = c("right", "top"))
+dev.off()
+
+
+
+
+######Parameter estimate and t-value maps for Perc_HomeW######
+
+Map_Perc_HomeW_beta_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_HomeW_beta", style="equal", n=7)
+Map_Perc_HomeW_TV_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_HomeW_TV", style="equal", n=7)
+
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_HomeW_beta_firstCheck, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HomeW_TV_firstCheck, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Create classification class breaks
+breaksPerc_HomeW_beta <- seq(-0.988, 4.287, length.out = 7)
+
+
+tm_shape(mapGWR) + tm_fill("Perc_HomeW_beta", style="fixed", breaks=breaksPerc_HomeW_beta, palette="RdBu")+tm_borders()
+ 
+# Calculate current bounding box of the data and range in x and y directions
+bbox1 <- st_bbox(mapGWR) 
+xrange <- bbox1$xmax - bbox1$xmin # range of x values
+yrange <- bbox1$ymax - bbox1$ymin # range of y values
+# Let's extend left-to-right dimension by adding 25% more space to the right
+bbox1[3] <- bbox1[3] + (0.25 * xrange) 
+# Now we make this into an sf polygon
+bbox1 <- bbox1 %>% st_as_sfc()
+# And include this into the map, plus set the legend to appear on the top right
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeW_beta", style="fixed", breaks=breaksPerc_HomeW_beta, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_HomeW_beta_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeW_beta", style="fixed", breaks=breaksPerc_HomeW_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Make a better T value map for Perc_HomeW_TV
+
+# Create classification class breaks
+breaksPerc_HomeW_TV <- seq(-1.542, 7.608, length.out = 7)
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeW_TV", style="fixed", breaks=breaksPerc_HomeW_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_HomeW_TV_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeW_TV", style="fixed", breaks=breaksPerc_HomeW_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_HomeW_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HomeW_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Export the figure
+
+png(filename="Perc_HomeW_PE_TV.png", width = 1600)
+# Draw the map as above
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(Map_Perc_HomeW_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HomeW_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+# Close the graphics device
+dev.off()
+
+
+#Joint map 
+
+whereNonSig <- which(mapGWR$Perc_HomeW_TV>-1.96 & mapGWR$Perc_HomeW_TV<1.96)
+# This created a list of indices where T value shows that the parameter estimate is not significant
+
+# Now create a new attribute, identical to beta
+mapGWR$Perc_HomeW_beta_sig <- mapGWR$Perc_HomeW_beta
+
+# Now assign value NA to all nonsignificant rows in this attribute
+mapGWR$Perc_HomeW_sig[whereNonSig] <- NA
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeW_beta_sig", style="fixed", breaks=breaksPerc_HomeW_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeW_beta_sig", style="fixed", breaks=breaksPerc_HomeW_beta, palette="RdBu",colorNA="white",textNA="Non-significant")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Export into figure:
+png(filename="Perc_HomeW_beta_TV_JointMap.png", width = 1600)
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HomeW_beta_sig", style="fixed", breaks=breaksPerc_HomeW_beta, palette="RdBu",colorNA="white",textNA="Non-significant" )+tm_borders()+tm_layout(legend.position = c("right", "top"))
+dev.off()
+
+
+
+
+######Parameter estimate and t-value maps for Perc_Ethni######
+Map_Perc_Ethni_beta_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_Ethni_beta", style="equal", n=7)
+Map_Perc_Ethni_TV_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_Ethni_TV", style="equal", n=7)
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_Ethni_beta_firstCheck, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_Ethni_TV_firstCheck, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Create classification class breaks
+breaksPerc_Ethni_beta <- seq(-0.936, 0.540, length.out = 7)
+
+tm_shape(mapGWR) + tm_fill("Perc_Ethni_beta", style="fixed", breaks=breaksPerc_Ethni_beta, palette="RdBu")+tm_borders()
+
+# Calculate current bounding box of the data and range in x and y directions
+bbox1 <- st_bbox(mapGWR) 
+xrange <- bbox1$xmax - bbox1$xmin # range of x values
+yrange <- bbox1$ymax - bbox1$ymin # range of y values
+# Let's extend left-to-right dimension by adding 25% more space to the right
+bbox1[3] <- bbox1[3] + (0.25 * xrange) 
+# Now we make this into an sf polygon
+bbox1 <- bbox1 %>% st_as_sfc()
+# And include this into the map, plus set the legend to appear on the top right
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Ethni_beta", style="fixed", breaks=breaksPerc_Ethni_beta, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_Ethni_beta_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Ethni_beta", style="fixed", breaks=breaksPerc_Ethni_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Make a better T value map for Perc_Ethni_TV
+
+# Create classification class breaks
+breaksPerc_Ethni_TV <- seq(-3.537, 1.675, length.out = 7)
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Ethni_TV", style="fixed", breaks=breaksPerc_Ethni_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_Ethni_TV_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Ethni_TV", style="fixed", breaks=breaksPerc_Ethni_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_Ethni_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_Ethni_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Export the figure
+
+png(filename="Perc_Ethni_PE_TV.png", width = 1600)
+# Draw the map as above
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(Map_Perc_Ethni_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_Ethni_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+# Close the graphics device
+dev.off()
+
+
+#Joint map 
+
+whereNonSig <- which(mapGWR$Perc_Ethni_TV>-1.96 & mapGWR$Perc_Ethni_TV<1.96)
+# This created a list of indices where T value shows that the parameter estimate is not significant
+
+# Now create a new attribute, identical to beta
+mapGWR$Perc_Ethni_beta_sig <- mapGWR$Perc_Ethni_beta
+
+# Now assign value NA to all nonsignificant rows in this attribute
+mapGWR$Perc_Ethni_sig[whereNonSig] <- NA
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Ethni_beta_sig", style="fixed", breaks=breaksPerc_Ethni_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+ 
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Ethni_beta_sig", style="fixed", breaks=breaksPerc_Ethni_beta, palette="RdBu",colorNA="white",textNA="Non-significant")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Export into figure:
+png(filename="Perc_Ethni_beta_TV_JointMap.png", width = 1600)
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_Ethni_beta_sig", style="fixed", breaks=breaksPerc_Ethni_beta, palette="RdBu",colorNA="white",textNA="Non-significant" )+tm_borders()+tm_layout(legend.position = c("right", "top"))
+dev.off()
+
+###Parameter estimate and t-value maps for Perc_HH_3P######
+Map_Perc_HH_3P_beta_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_HH_3P_beta", style="equal", n=7)
+Map_Perc_HH_3P_TV_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_HH_3P_TV", style="equal", n=7)
+# Put the two maps into a grid, side by side in the following steps:
+# Create an empty new grid
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_HH_3P_beta_firstCheck, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HH_3P_TV_firstCheck, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Create classification class breaks
+breaksPerc_HH_3P_beta <- seq(-0.776, 0.357, length.out = 7)
+
+tm_shape(mapGWR) + tm_fill("Perc_HH_3P_beta", style="fixed", breaks=breaksPerc_HH_3P_beta, palette="RdBu")+tm_borders()
+
+# Calculate current bounding box of the data and range in x and y directions
+bbox1 <- st_bbox(mapGWR) 
+xrange <- bbox1$xmax - bbox1$xmin # range of x values
+yrange <- bbox1$ymax - bbox1$ymin # range of y values
+# Let's extend left-to-right dimension by adding 25% more space to the right
+bbox1[3] <- bbox1[3] + (0.25 * xrange) 
+# Now we make this into an sf polygon
+bbox1 <- bbox1 %>% st_as_sfc()
+# And include this into the map, plus set the legend to appear on the top right
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HH_3P_beta", style="fixed", breaks=breaksPerc_HH_3P_beta, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_HH_3P_beta_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HH_3P_beta", style="fixed", breaks=breaksPerc_HH_3P_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Make a better T value map for Perc_HH_3P_TV
+
+# Create classification class breaks
+breaksPerc_HH_3P_TV <- seq(-2.835, 1.642, length.out = 7)
+
+# An improved T value map - let's first see how this looks like
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HH_3P_TV", style="fixed", breaks=breaksPerc_HH_3P_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_HH_3P_TV_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HH_3P_TV", style="fixed", breaks=breaksPerc_HH_3P_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_HH_3P_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HH_3P_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Export the figure
+
+png(filename="Perc_HH_3P_PE_TV.png", width = 1600)
+# Draw the map as above
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(Map_Perc_HH_3P_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_HH_3P_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+# Close the graphics device
+dev.off()
+
+
+#Joint map 
+
+whereNonSig <- which(mapGWR$Perc_HH_3P_TV>-1.96 & mapGWR$Perc_HH_3P_TV<1.96)
+# This created a list of indices where T value shows that the parameter estimate is not significant
+
+# Now create a new attribute, identical to beta
+mapGWR$Perc_HH_3P_beta_sig <- mapGWR$Perc_HH_3P_beta
+
+# Now assign value NA to all nonsignificant rows in this attribute
+mapGWR$Perc_HH_3P_sig[whereNonSig] <- NA
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HH_3P_beta_sig", style="fixed", breaks=breaksPerc_HH_3P_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HH_3P_beta_sig", style="fixed", breaks=breaksPerc_HH_3P_beta, palette="RdBu",colorNA="white",textNA="Non-significant")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Export into figure:
+png(filename="Perc_HH_3P_beta_TV_JointMap.png", width = 1600)
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_HH_3P_beta_sig", style="fixed", breaks=breaksPerc_HH_3P_beta, palette="RdBu",colorNA="white",textNA="Non-significant" )+tm_borders()+tm_layout(legend.position = c("right", "top"))
+dev.off()
+
+
+
+#####Parameter estimate and t-value maps for Perc_65Plu######
+Map_Perc_65Plu_beta_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_65Plu_beta", style="equal", n=7)
+Map_Perc_65Plu_TV_firstCheck <- tm_shape(mapGWR) + tm_fill("Perc_65Plu_TV", style="equal", n=7)
+
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_65Plu_beta_firstCheck, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_65Plu_TV_firstCheck, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Create classification class breaks
+breaksPerc_65Plu_beta <- seq(-0.302, 1.109, length.out = 7)
+
+tm_shape(mapGWR) + tm_fill("Perc_65Plu_beta", style="fixed", breaks=breaksPerc_65Plu_beta, palette="RdBu")+tm_borders()
+
+# Calculate current bounding box of the data and range in x and y directions
+bbox1 <- st_bbox(mapGWR) 
+xrange <- bbox1$xmax - bbox1$xmin # range of x values
+yrange <- bbox1$ymax - bbox1$ymin # range of y values
+# Let's extend left-to-right dimension by adding 25% more space to the right
+bbox1[3] <- bbox1[3] + (0.25 * xrange) 
+# Now we make this into an sf polygon
+bbox1 <- bbox1 %>% st_as_sfc()
+# And include this into the map, plus set the legend to appear on the top right
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_65Plu_beta", style="fixed", breaks=breaksPerc_65Plu_beta, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_65Plu_beta_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_65Plu_beta", style="fixed", breaks=breaksPerc_65Plu_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Make a better T value map for Perc_65Plu_TV
+
+# Create classification class breaks
+breaksPerc_65Plu_TV <- seq(-0.934, 3.760, length.out = 7)
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_65Plu_TV", style="fixed", breaks=breaksPerc_65Plu_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+Map_Perc_65Plu_TV_final <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_65Plu_TV", style="fixed", breaks=breaksPerc_65Plu_TV, palette="RdBu")+tm_borders()+
+  tm_layout(legend.position = c("right", "top"))
+
+# Create an empty new grid
+grid.newpage()
+# Define the layout of the grid (1 row, 2 columns)
+pushViewport(viewport(layout=grid.layout(1,2)))
+# Insert the two maps into the relevant positions in the grid
+print(Map_Perc_65Plu_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_65Plu_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Export the figure
+
+png(filename="Perc_65Plu_PE_TV.png", width = 1600)
+# Draw the map as above
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(Map_Perc_65Plu_beta_final, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(Map_Perc_65Plu_TV_final, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+# Close the graphics device
+dev.off()
+
+#Joint map 
+
+whereNonSig <- which(mapGWR$Perc_65Plu_TV>-1.96 & mapGWR$Perc_65Plu_TV<1.96)
+# This created a list of indices where T value shows that the parameter estimate is not significant
+
+# Now create a new attribute, identical to beta
+mapGWR$Perc_65Plu_beta_sig <- mapGWR$Perc_65Plu_beta
+
+# Now assign value NA to all nonsignificant rows in this attribute
+mapGWR$Perc_65Plu_sig[whereNonSig] <- NA
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_65Plu_beta_sig", style="fixed", breaks=breaksPerc_65Plu_beta, palette="RdBu")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_65Plu_beta_sig", style="fixed", breaks=breaksPerc_65Plu_beta, palette="RdBu",colorNA="white",textNA="Non-significant")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Export into figure:
+png(filename="Perc_65Plu_beta_TV_JointMap.png", width = 1600)
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Perc_65Plu_beta_sig", style="fixed", breaks=breaksPerc_65Plu_beta, palette="RdBu",colorNA="white",textNA="Non-significant" )+tm_borders()+tm_layout(legend.position = c("right", "top"))
+dev.off()
+
+####Comparison of global and local standard residuals ######
+
+##map of the localr2####
+#local R-squared with equal interval classification and 7 classes
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Local_R2", style="equal", n=7, palette="Greens")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+# Export into figure:
+png(filename="Local_R2.png", width = 1600)
+tm_shape(mapGWR, bbox=bbox1) + tm_fill("Local_R2", style="equal", n=7, palette="Greens")+tm_borders()+tm_layout(legend.position = c("right", "top"))
+dev.off()
+
+
+###Global residuals####
+
+# Run a global linear model
+globalmodel <- lm(dataGWR$AvDom_Heat ~ dataGWR$Perc_65Plu + dataGWR$Perc_HomeO + dataGWR$Perc_Priva + dataGWR$Perc_HH_3P + dataGWR$Perc_Ethni + dataGWR$Perc_HH_De + dataGWR$Perc_HH_Te + dataGWR$Perc_HomeW + dataGWR$LandArePer)
+
+#  results
+summary(globalmodel)
+
+# calculate the corrected AIC, to be able to compare with the local model
+globalAICc <- AICc(globalmodel)
+capture.output(globalmodel, file="globalmodel_descriptiveResult.txt", append = TRUE)
+
+# Calculate global residuals in three steps
+
+# Step 1: calculate predicted Average domestic heat demand 
+# I exclude the two variables as determined above 
+dataGWR$predictedAvDom_Heat <- -9.909035 + 0.336278 * dataGWR$Perc_65Plu + 0.105111 * dataGWR$Perc_HomeO * + 0.258259 * dataGWR$Perc_Priva +0.091462 * dataGWR$Perc_HH_3P -0.114256 * dataGWR$Perc_Ethni + 0.797470 * dataGWR$Perc_HomeW +  0.001989 * dataGWR$LandArePer
+head(dataGWR)
+
+# Step 2: Calculate global residuals
+dataGWR$globalRes <- dataGWR$AvDom_Heat - dataGWR$predictedAvDom_Heat
+head(dataGWR)
+
+# Step 3: Find the mean and standard deviation of residuals
+M <- mean(dataGWR$globalRes)
+SD <- sd(dataGWR$globalRes)
+print(M)
+print(SD)
+
+# Calculate standard residuals
+dataGWR$stGlobalRes <- (dataGWR$globalRes-M)/SD
+
+# Check the min and max of standardised global residuals
+ming <- min(dataGWR$stGlobalRes)
+maxg <- max(dataGWR$stGlobalRes)
+print(ming)
+print(maxg)
+
+# list your class boundaries using min and max of standard residuals, 0 as central value and the relevant 1% and 5% cutoff values
+breaksGlRes <- c(ming, -2.58, -1.96, 0, 1.96, 2.58, maxg)
+
+
+# Create the map with these as breaks and use a bivariate (divergent) palette -> find this with display.brewer.all(type="div")
+globRes <- tm_shape(dataGWR, bbox=bbox1) + tm_fill("stGlobalRes", style="fixed", breaks=breaksGlRes, palette="RdBu") +tm_borders()+tm_borders()+tm_layout(legend.position = c("right", "top"))
+
+head(dataGWR)
+
+# Join results to the original data
+mapGWR <- cbind(dataGWR, as.matrix(results))
+
+# Check:
+head(mapGWR)
+
+
+####Local standard residuals####
+# Check the min and max of standardised local residuals
+minl <- min(mapGWR$Stud_residual)
+maxl <- max(mapGWR$Stud_residual)
+
+# Make a map as per above:
+# list your class boundaries using min and max of standard residuals, 0 as central value and the relevant 1% and 5% cutoff values
+breaksLRes <- c(minl, -2.58, -1.96, 0, 1.96, 2.58, maxl)
+
+# Create the map with these as breaks and use a bivariate (divergent) palette -> find this with display.brewer.all(type="div")
+locRes <- tm_shape(mapGWR, bbox=bbox1) + tm_fill("Stud_residual", style="fixed", breaks=breaksLRes, palette="RdBu") +tm_borders()+tm_layout(legend.position = c("right", "top"))
+# End of local residual map
+
+# Put the two residual maps in a gridded display
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(globRes, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(locRes, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+
+# Export into figure:
+png(filename="ResidualMaps.png", width = 1024)
+grid.newpage()
+pushViewport(viewport(layout=grid.layout(1,2)))
+print(globRes, vp=viewport(layout.pos.col = 1, layout.pos.row =1))
+print(locRes, vp=viewport(layout.pos.col = 2, layout.pos.row =1))
+dev.off()
+
+# Results saved to a new shapefile
+#st_write(mapGWR,"Glasgow_GWR_results.shp", delete_layer = TRUE)
+#st_write(mapGWR,"Glasgow_GWR_results_new.shp")
+st_write(mapGWR,"Glasgow_GWR_results_new1.shp")
+
+#then go calculate the spatial autocorrelation of the residuals using Global Moran's I in GeoDa
